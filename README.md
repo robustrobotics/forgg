@@ -14,56 +14,40 @@ wisdom, mother of Athena.
 - pybox2d
 - triangle
 - (optional) pydot
+- (optional) matplotlib
+- (optional) descartes
 - (optional) nosetests
+
 
 Everything can be installed through pip.
 ```
-pip install numpy scipy shapely Box2D triangle
+pip install -r requirements.txt
 ```
-If you are not in a `virtualenv`, this will install to `/usr/` by default, and
-will require `sudo` privileges. If you'd rather install somewhere else, run
+Several `apt` packages are required for `pip` to install these packages without
+errors; the following string of commands will install the dependencies of
+this package in a virtualenv.
 ```
-pip install --upgrade --install-option="--prefix=$MY_PREFIX" numpy scipy shapely Box2D triangle
+sudo apt-get install -y python-dev python-virtualenv libfreetype6-dev libpng-dev swig libgeos-dev pkg-config
+virtualenv env
+source env/bin/activate
+pip install -r requirements.txt
 ```
-with `$MY_PREFIX` set to, for instance, `$HOME/rrg`. Note that you must also
+
+If you invoke pip while not in a `virtualenv`, it will install to `/usr/` by
+default, and will require `sudo` privileges. If you'd rather install somewhere
+else, run
+```
+pip install --upgrade --install-option="--prefix=$MY_PREFIX" -r requirements.txt
+```
+with `$MY_PREFIX` set to, for instance, `$HOME/frogg`. Note that you must also
 update your `PYTHONPATH` environment variable accordingly to use the packages.
-
-NOTE: installing the `pybox2d` from `pip` might fail if `swig` is not installed.
-If that happens, `apt-get install swig` may help.
-
-## Installation
-This code is intended to be used as a ROS package, like most RRG code, and can
-be installed using the normal catkin commands.
-```
-catkin build --this
-```
-
-To use this code without ROS or catkin, install it as a normal python package:
-```
-python setup.py install --prefix=$MYPREFIX
-```
-Omitting the prefix will install to the system path and will require `sudo`.
 
 ## Usage 
 
-There are currently no examples to run, as the package is incomplete. To run the
-tests from anywhere in the `rrg` repository, use the normal catkin command:
+The `frogg` package contains the bookkeeping code required to organize the
+random geometric graphs; the planning algorithms themselves are implemented in
+the `block_pushing.py` script. To run a job, create a jobfile and call `run.py`.
 ```
-catkin build metis -v --make-args test
+./run.py jobfile
 ```
-
-This will provide minimal output. To run the tests and see the normal `nose`
-output, from the package directory run `nosetests` without arguments.
-
-### Recording video
-I use ffmpeg to record videos. The version in the ubuntu repositories is a fork
-(`avconv`) which I couldn't get to work, but the 'real' ffmpeg works fine. You
-can get it from the ppa `ppa:mc3man/trusty-media`, by following these steps.
-```
-sudo add-apt-repository ppa:mc3man/trusty-media
-sudo apt-get update
-sudo apt-get install ffmpeg
-sudo apt-get upgrade
-```
-If ffmpeg isn't found or fails, the code will let you know, but shouldn't crash.
 
