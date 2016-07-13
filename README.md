@@ -1,8 +1,9 @@
-# metis
+# FROGG
 
 This package is contains tools for evaluating models and inference algorithms
-for task and motion planning. The name comes from Metis, a Greek goddess of
-wisdom, mother of Athena.
+for task and motion planning. The name is an abbreviation for factored random
+orbital geometric graphs; for a description of the algorithms implemented, see
+our [WAFR 2016](todo) paper.
 
 ## Maintainer
 - Will Vega-Brown (wrvb@csail.mit.edu)
