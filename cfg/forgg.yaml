@@ -1,0 +1,20 @@
+noupper_blocked_forgg_0200_00:
+  algorithm: forgg
+  domain:
+    upper_door: True
+  instance:
+    box1:
+    - 3
+    - 5
+    - -0.2
+    box2:
+    - 5
+    - 2.5
+    - 0.1
+    robot:
+    - 2
+    - 2
+    - 0
+  solver:
+    count: 200
+    seed: 0

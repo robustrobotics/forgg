@@ -1,0 +1,20 @@
+noupper_blocked_tamp_0200_00:
+  algorithm: tamp
+  domain:
+    upper_door: False
+  instance:
+    box1:
+    - 3
+    - 5
+    - -0.2
+    box2:
+    - 5
+    - 2.5
+    - 0.1
+    robot:
+    - 2
+    - 2
+    - 0
+  solver:
+    count: 2000
+    seed: 0
