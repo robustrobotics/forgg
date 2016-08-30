@@ -295,6 +295,7 @@ class Orbit(object):
         """
         self.mode = mode
         self.configuration = configuration
+        self.geometry = geometry
 
     def __eq__(self, other):
         return self.holding == other.holding and all(
@@ -342,129 +343,21 @@ class Orbit(object):
         else:
             raise ValueError(("Modes not adjacent", mode, self.mode))
 
-class GenericOrbitBookkeeping(object):
-    """Perform bookkeeping for the generic-orbit (Hauser) algorithm
-    """
-    def __init__(self):
-        pass
-
-
-def hauser_solver(instance, n=200, nu=.1, random_seed=0):
-    """Solve a problem isntance using Hauser's algorithm
-
-    Args:
-        instance: a block_pushing.ProblemInstance
-        n: number of samples per orbit
-        nu: fraction of samples to generate from intersecting orbits
-    """
-
-    if random_seed is not None:
-        prng = numpy.random.RandomState(random_seed)
-    else:
-        prng = numpy.random.RandomState()
-
-    statistics = Statistics()
-
-    start_vertex = None
-    goal_vertex = None
-
-    open_set = metis.queue.PriorityQueue(
-        [(start_vertex, instance.heuristic(start_vertex))])
-    cost_to_come = {start_vertex: 0}
-    parent = {start_vertex: None}
-    seen = set()
-
-    goal_vertex = None
-    with statistics.timer('search_time') as timer:
-        geometry = metis.geometry.ManyShapeGeometry(
-            instance.world, instance.bodies,
-            instance.domain.obstacle_geometry.bounds)
-        configurations = {(name, None): [value,]
-                          for name, value in instance.start.iteritems()}
-        factored_graph = FactoredRandomGeometricGraph(
-            geometry, instance.dynamics, default_count=200,
-            blacklist=NoObjectContactBlacklist(),
-            configurations=configurations)
-        count = 0
-        while open_set:
-            count += 1
-            if count % 500 == 0:
-                print ("after {dt} s, {n} vertices explored "
-                       "({vps} vertices per second)"
-                       .format(dt=timer.elapsed(), n=count,
-                               vps=count/timer.elapsed()))
-
-            current = open_set.pop()
-            seen.add(current)
-            if instance.is_goal(factored_graph[current]):
-                goal_vertex = current
-                break
-            for neighbor in factored_graph.neighbors(current):
-                if neighbor in seen:
-                    continue
-                new_cost = cost_to_come[current] + factored_graph.cost(
-                    current, neighbor)
-                if new_cost < cost_to_come.get(neighbor, float('inf')):
-                    parent[neighbor] = current
-                    cost_to_come[neighbor] = new_cost
-                    open_set[neighbor] = new_cost
-        statistics['search_count'] = count
-    print statistics.format("{search_count} vertices explored in "
-                            "{search_time} seconds")
-
-    if goal_vertex is not None:
-        print "Found path to goal with cost {}".format(
-            cost_to_come[goal_vertex])
-        vertex_path = [goal_vertex]
-        while parent[vertex_path[-1]] is not None:
-            vertex_path.append(parent[vertex_path[-1]])
-        vertex_path.reverse()
-        assert vertex_path[0] == start_vertex
-
-        path = [factored_graph[v] for v in vertex_path]
-        path_cost = cost_to_come[goal_vertex]
-
-        vertex_component_paths = []
-        component = []
-        for first, second in metis.iterators.sequential_pairs(path):
-            component.append(first)
-            if first['robot'][0] != second['robot'][0]:
-                component.append(second)
-                vertex_component_paths.append(component)
-                component = []
-        vertex_component_paths.append(component)
-        component_paths = [[factored_graph[v] for v in component]
-                           for component in vertex_component_paths]
-        print "\n\n".join("\n".join(
-            str(v) for v in component) for component in component_paths)
-
-    else:
-        print "Found no path to goal"
-        vertex_path = None
-        path = None
-        path_cost = float('inf')
-
-    return {
-        'graph': factored_graph,
-        'parent': parent,
-        'cost_to_come': cost_to_come,
-        'start_vertex': start_vertex,
-        'goal_vertex': goal_vertex,
-        'search_time': statistics['search_time'],
-        'search_count': statistics['search_count'],
-        'build_time': statistics['build_time'],
-        'build_count': statistics['build_count'],
-        'vertex_path': vertex_path,
-        'path': path,
-        'component_paths': component_paths,
-        'path_cost': path_cost
-    }
-
 class Solver(object):
     def __init__(self, instance, log):
         super(Solver, self).__init__()
         self.instance = instance
         self.log = log
+
+class OBT(Solver):
+    """Perform bookkeeping for the generic-orbit (Hauser) algorithm
+    """
+    def __init__(self, instance, log, count=200, epsilon=0., eta=1., seed=0):
+        super(OBT, self).__init__(instance, log)
+        self.count = count
+        self.epsilon = epsilon
+        self.eta = eta
+        self.seed = seed
 
 class TAMP(Solver):
     def __init__(self, instance, log, count=200, epsilon=0., eta=1., seed=0):
@@ -474,23 +367,17 @@ class TAMP(Solver):
         self.eta = eta
         self.seed = seed
 
-    def solve_subproblem(self, start, goal_region, start_holding=None,
-                         holding_pose=None, end_holding=None):
-        """Solve a subproblem
+    def configure_subproblem(self, start_description, goal_description):
+        """Configure a subproblem for solving
 
-        Args:
-            start (dict): initial configuration at start of subproblem
-            goal_region: goal achieved when robot/object pair is in
-                goal_region
-            start_holding (str): name of object the robot is holding at
-                the start of subproblem, or None if not holding anything
-            holding_pose (tuple): relative pose of held object if not
-                None
-            end_holding (str): name of object the robot is to be holding
-                at the end of subproblem, or None if not to hold
-                anything
+        A subproblem, in this context, is a graph to search and a
+        Boolean function that determines which vertices are goal
+        vertices.
         """
-        # Default is not holding anything at start
+        # pylint: disable=too-many-arguments,too-many-locals
+        start, start_holding, holding_pose = start_description
+        goal_region, end_holding = goal_description
+
         fixed_poses = {'box1': start['box1'],
                        'box2': start['box2']}
         relative_poses = {'robot': (0, 0, 0)}
@@ -518,14 +405,6 @@ class TAMP(Solver):
             goal_vertices = set()
             goal_rpos = None
 
-        # from_fixtures = metis.geometry.shapely_from_box2d_fixtures
-        # obstacles = from_fixtures(
-        #     f for body in geometry.world for f in body.fixtures
-        #     if f not in geometry.fixtures)
-        # for goal_vertex in goal_vertices:
-        #     cfg = configurations[goal_vertex]
-        #     metis.debug.graphical_debug("goal is {}free".format('' if geometry.configuration_is_free(cfg) else 'not '), lambda ax, c=cfg: draw_polygon(ax, from_fixtures(geometry.fixtures, c), fc='r'), lambda ax: draw_polygon(ax, obstacles))
-
         graph = metis.random_geometric_graphs.SE2RandomGraph(
             geometry, self.count, epsilon=self.epsilon, eta=self.eta,
             configurations=configurations)
@@ -533,8 +412,27 @@ class TAMP(Solver):
         is_goal = lambda vertex: (
             vertex in goal_vertices or
             (goal_region is not None and
-             geometry.fixtures_in_region(graph[vertex], goal_region)))
+             graph.geometry.fixtures_in_region(graph[vertex], goal_region)))
 
+        # from_fixtures = metis.geometry.shapely_from_box2d_fixtures
+        # obstacles = from_fixtures(
+        #     f for body in geometry.world for f in body.fixtures
+        #     if f not in geometry.fixtures)
+        # for goal_vertex in goal_vertices:
+        #     cfg = configurations[goal_vertex]
+            # metis.debug.graphical_debug("goal is {}free".format(
+            #     '' if geometry.configuration_is_free(cfg) else 'not '),
+            #     lambda ax, c=cfg: draw_polygon(
+            #         ax, from_fixtures(geometry.fixtures, c), fc='r'),
+            #     lambda ax: draw_polygon(ax, obstacles))
+        return graph, is_goal, goal_rpos
+
+    def search(self, graph, is_goal):
+        """Search a graph
+
+        Performs Dijkstra's algorithm on graph with inital vertex 0 and
+        goal criterion is_goal
+        """
         start_vertex = 0
         goal_vertex = None
 
@@ -570,6 +468,23 @@ class TAMP(Solver):
             self.log.info("{count} vertices explored in {time} seconds".format(
                 count=pop_count, time=timer.elapsed()))
 
+            return {'graph': graph,
+                    'search_count': pop_count,
+                    'start_vertex': start_vertex,
+                    'goal_vertex': goal_vertex,
+                    'search_time': timer.elapsed(),
+                   }, {'parent': parent, 'cost_to_come': cost_to_come}
+
+    def prepare_results(self, start_description, goal_description,
+                        result, extra):
+        """Prepare detailed results"""
+        start, start_holding, holding_pose = start_description
+        _, end_holding = goal_description
+        goal_vertex = result['goal_vertex']
+        cost_to_come = extra['cost_to_come']
+        parent = extra['parent']
+        goal_rpos = result['goal_rpos']
+
         if goal_vertex is not None:
             self.log.info("Found path to goal with cost {}".format(
                 cost_to_come[goal_vertex]))
@@ -584,22 +499,23 @@ class TAMP(Solver):
                 state = {}
                 for obj in ('robot', 'box1', 'box2'):
                     if obj == 'robot':
-                        state[obj] = graph[vertex]
+                        state[obj] = result['graph'][vertex]
                     elif obj == start_holding:
                         state[obj] = apply_transform(
-                            graph[vertex], holding_pose)
+                            result['graph'][vertex], holding_pose)
                     else:
                         state[obj] = start[obj]
                 path.append(state)
             path_cost = cost_to_come[goal_vertex]
-            assert vertex_path[0] == start_vertex
+            end = path[-1]
+            assert vertex_path[0] == result['start_vertex']
         else:
             self.log.info("Found no path to goal")
 
             vertex_path = None
             path = None
             path_cost = float('inf')
-
+            end = None
 
         if end_holding is None:
             rpos = None
@@ -608,52 +524,42 @@ class TAMP(Solver):
         else:
             rpos = None
 
-        if goal_vertex is None:
-            end = None
-        else:
-            end = path[-1]
-
-        # geometry = self.instance.domain.create_se2_geometry(
-        #     fixed_poses=fixed_poses, relative_poses=relative_poses,
-        #     seed=self.seed)
-        # from_fixtures = metis.geometry.shapely_from_box2d_fixtures
-        # obstacles = from_fixtures(
-        #     f for body in geometry.world for f in body.fixtures
-        #     if f not in geometry.fixtures)
-        # fns = [lambda ax: draw_polygon(ax, obstacles),
-        #        lambda ax: draw_polygon(
-        #            ax, from_fixtures(geometry.fixtures, start['robot']), fc='b')
-        #       ]
-        # for vertex in goal_vertices:
-        #     cfg = configurations[vertex]
-        #     if geometry.configuration_is_free(cfg):
-        #         fns.append(lambda ax, c=cfg:
-        #                    draw_polygon(ax, from_fixtures(geometry.fixtures, c),
-        #                                 fc='r', alpha=.2))
-        # if goal_vertex is not None:
-        #     fns.append(lambda ax: draw_polygon(
-        #         ax, from_fixtures(geometry.fixtures, configurations[goal_vertex]), fc='g'))
-        #
-        # if goal_region is not None:
-        #     fns.append(lambda ax: draw_polygon(ax, goal_region, fc='r', alpha=.2))
-        # if goal_vertex is None:
-        #     message = "Failed to accomplish goal"
-        # else:
-        #     message = "Accomplished goal"
-        # metis.debug.graphical_debug(message, *fns)
-
         return goal_vertex is not None, {
             'start': start,
             'end': end,
-            'graph': graph,
-            'search_count': pop_count,
-            'start_vertex': start_vertex,
-            'goal_vertex': goal_vertex,
-            'vertex_path': vertex_path,
             'path': path,
             'path_cost': path_cost,
             'goal_rpos': rpos,
-        }, {'parent': parent, 'cost_to_come': cost_to_come}
+        }
+
+    def solve_subproblem(self, start_description, goal_description):
+        """Solve a subproblem
+
+        Args:
+            start_description (tuple): three element tuple describing start
+                dict: initial configuration at start of subproblem
+                str: name of object the robot is holding at the start of
+                    subproblem, or None if not holding anything
+                tuple: relative pose of held object if not None
+            goal_description (tuple): two element tuple describing goal
+                shapely geometry: goal achieved when robot/object pair is in
+                    goal_region
+                str: name of object the robot is to be holding
+                at the end of subproblem, or None if not to hold
+                anything
+        """
+        # Default is not holding anything at start
+        graph, is_goal, goal_rpos = self.configure_subproblem(
+            start_description, goal_description)
+            # (start, start_holding, holding_pose), (goal_region, end_holding))
+
+        result, extra = self.search(graph, is_goal)
+        result['goal_rpos'] = goal_rpos
+
+        success, prepared = self.prepare_results(
+            start_description, goal_description, result, extra)
+        result.update(prepared)
+        return success, result, extra
 
     def try_plan(self, plan, plan_name):
         """Try to instantiate a plan"""
@@ -671,11 +577,12 @@ class TAMP(Solver):
             step_name = "{}_step{}".format(plan_name, j)
             with Timer() as timer:
                 goal_region, start_holding, end_holding = step
-                self.log.info(str(step))
                 assert start_holding is None or holding_pose is not None
+
+                start_description = (start, start_holding, holding_pose)
+                goal_description = (goal_region, end_holding)
                 success, result, extra = self.solve_subproblem(
-                    start, goal_region, start_holding, holding_pose,
-                    end_holding)
+                    start_description, goal_description)
                 result['search_time'] = timer.elapsed()
 
                 results['component_paths'].append(result['path'])
@@ -747,101 +654,110 @@ class TAMP(Solver):
             results['component_paths'] = None
         return success, results, extras
 
-def fragg_solver(instance, log, n=200, seed=0, maxcount=None):
-    """Solve a problem isntance using FRAGG
+class FORGG(Solver):
+    def __init__(self, instance, log, count=200, epsilon=0., eta=1., seed=0,
+                 maxcount=None):
+        super(FORGG, self).__init__(instance, log)
+        self.count = count
+        self.epsilon = epsilon
+        self.eta = eta
+        self.seed = seed
+        self.maxcount = maxcount
 
-    Args:
-        instance: a block_pushing.ProblemInstance
-        **kwargs: algorithmic parameters
-    """
-    statistics = Statistics()
+        self.statistics = Statistics()
 
-    with statistics.timer('build_time') as timer:
-        geometry = metis.geometry.ManyShapeGeometry(
-            instance.world, instance.bodies,
-            instance.domain.obstacle_geometry.bounds, seed=seed)
-        configurations = {(name, None): [value,]
-                          for name, value in instance.start.iteritems()}
-        factored_graph = FactoredRandomGeometricGraph(
-            geometry, instance.dynamics, default_count=n,
-            blacklist=NoObjectContactBlacklist(),
-            configurations=configurations)
-    statistics['build_count'] = len(factored_graph)
-    log.info(statistics.format(
-        "{build_time} seconds elapsed\ngraph has {build_count} nodes"))
+        with self.statistics.timer('build_time') as timer:
+            self.geometry = metis.geometry.ManyShapeGeometry(
+                instance.world, instance.bodies,
+                instance.domain.obstacle_geometry.bounds, seed=seed)
+            configurations = {(name, None): [value,]
+                              for name, value in instance.start.iteritems()}
+            self.factored_graph = FactoredRandomGeometricGraph(
+                self.geometry, instance.dynamics, default_count=count,
+                blacklist=NoObjectContactBlacklist(),
+                configurations=configurations)
+        self.statistics['build_count'] = len(self.factored_graph)
+        self.log.info(self.statistics.format(
+            "{build_time} seconds elapsed\ngraph has {build_count} nodes"))
 
-    start_vertex = factored_graph.nearest(instance.start)
-    goal_vertex = None
+    def solve(self):
+        """Solves a problem instance using a simple TAMP solver
 
-    open_set = metis.queue.PriorityQueue(
-        [(start_vertex, instance.heuristic(start_vertex))])
-    cost_to_come = {start_vertex: 0}
-    parent = {start_vertex: None}
-    seen = set()
+        Rather than implement a PDDL planner and a description of the
+        problem, we hard code several reasonable plans and then instantiate
+        them. The first to return successfully is returned as the solution.
+        """
+        instance = self.instance
+        start_vertex = self.factored_graph.nearest(instance.start)
+        goal_vertex = None
 
-    goal_vertex = None
-    try:
-        with statistics.timer('search_time') as timer:
-            count = 0
+        open_set = metis.queue.PriorityQueue(
+            [(start_vertex, instance.heuristic(start_vertex))])
+        cost_to_come = {start_vertex: 0}
+        parent = {start_vertex: None}
+        seen = set()
+
+        goal_vertex = None
+        with self.statistics.timer('search_time') as timer:
+            pop_count = 0
             while open_set:
-                count += 1
-                if maxcount is not None and count > maxcount:
+                pop_count += 1
+                if self.maxcount is not None and pop_count > self.maxcount:
                     break
-                elif count % 1000 == 0:
-                    log.info("after {dt:.2f} s, {n} vertices explored "
-                             "({vps:.2f} vertices per second)"
-                             .format(dt=timer.elapsed(), n=count,
-                                     vps=count/timer.elapsed()))
+                elif pop_count % 1000 == 0:
+                    self.log.info("after {dt:.2f} s, {n} vertices explored "
+                                  "({vps:.2f} vertices per second)"
+                                  .format(dt=timer.elapsed(), n=pop_count,
+                                          vps=pop_count/timer.elapsed()))
 
                 current = open_set.pop()
                 seen.add(current)
-                if instance.is_goal(factored_graph[current]):
+                if instance.is_goal(self.factored_graph[current]):
                     goal_vertex = current
                     break
-                for neighbor in factored_graph.neighbors(current):
+                for neighbor in self.factored_graph.neighbors(current):
                     if neighbor in seen:
                         continue
                     new_cost = (cost_to_come[current] +
-                                factored_graph.cost(current, neighbor))
+                                self.factored_graph.cost(current, neighbor))
                     if new_cost < cost_to_come.get(neighbor, float('inf')):
                         parent[neighbor] = current
                         cost_to_come[neighbor] = new_cost
                         open_set[neighbor] = new_cost
-            statistics['search_count'] = count
-    except MemoryError:
-        log.exception("Search failed: out of memory")
-    log.info(statistics.format(
-        "{search_count} vertices explored in {search_time} seconds"))
+            self.statistics['search_count'] = pop_count
+        self.log.info(self.statistics.format(
+            "{search_count} vertices explored in {search_time} seconds"))
 
-    if goal_vertex is not None:
-        log.info("Found path to goal with cost {}".format(
-            cost_to_come[goal_vertex]))
-        vertex_path = [goal_vertex]
-        while parent[vertex_path[-1]] is not None:
-            vertex_path.append(parent[vertex_path[-1]])
-        vertex_path.reverse()
+        if goal_vertex is not None:
+            self.log.info("Found path to goal with cost {}".format(
+                cost_to_come[goal_vertex]))
+            vertex_path = [goal_vertex]
+            while parent[vertex_path[-1]] is not None:
+                vertex_path.append(parent[vertex_path[-1]])
+            vertex_path.reverse()
 
-        path = [factored_graph[v] for v in vertex_path]
-        path_cost = cost_to_come[goal_vertex]
-        assert vertex_path[0] == start_vertex
-    else:
-        log.info("Found no path to goal")
-        vertex_path = None
-        path = None
-        path_cost = float('inf')
+            path = [self.factored_graph[v] for v in vertex_path]
+            path_cost = cost_to_come[goal_vertex]
+            assert vertex_path[0] == start_vertex
+        else:
+            self.log.info("Found no path to goal")
+            vertex_path = None
+            path = None
+            path_cost = float('inf')
 
-    return {
-        'graph': factored_graph,
-        'start_vertex': start_vertex,
-        'goal_vertex': goal_vertex,
-        'search_time': statistics['search_time'],
-        'search_count': statistics['search_count'],
-        'build_time': statistics['build_time'],
-        'build_count': statistics['build_count'],
-        'vertex_path': vertex_path,
-        'path': path,
-        'path_cost': path_cost
-    }, {'parent': parent, 'cost_to_come': cost_to_come}
+        return goal_vertex is not None, {
+            'graph': self.factored_graph,
+            'start_vertex': start_vertex,
+            'goal_vertex': goal_vertex,
+            'search_time': self.statistics['search_time'],
+            'search_count': self.statistics['search_count'],
+            'build_time': self.statistics['build_time'],
+            'build_count': self.statistics['build_count'],
+            'vertex_path': vertex_path,
+            'path': path,
+            'path_cost': path_cost
+        }, {'parent': parent, 'cost_to_come': cost_to_come}
+
 
 def run(task_name, log, parameters):
     """Run a block pushing task"""
@@ -849,26 +765,31 @@ def run(task_name, log, parameters):
 
     domain = ProblemDomain(**parameters['domain'])
     instance = ProblemInstance(domain, **parameters['instance'])
-    if algorithm == 'fragg':
-        result, extra = fragg_solver(instance, log, **parameters['solver'])
-    elif algorithm == 'tamp':
-        success, result, extra = TAMP(
-            instance, log, **parameters['solver']).solve()
-    else:
-        log.info('Unknown algorithm {}'.format(algorithm))
-        return
-    log.info("\nResults:" + '\n'.join(
-        "    {}: {}".format(field, value)
-        for (field, value) in sorted(result.iteritems())
-        if isinstance(value, (int, long, float))))
+    try:
+        if algorithm == 'forgg':
+            success, result, extra = FORGG(
+                instance, log, **parameters['solver']).solve()
+        elif algorithm == 'tamp':
+            success, result, extra = TAMP(
+                instance, log, **parameters['solver']).solve()
+        else:
+            log.info('Unknown algorithm {}'.format(algorithm))
+            return False
+        log.info("\nResults:" + '\n'.join(
+            "    {}: {}".format(field, value)
+            for (field, value) in sorted(result.iteritems())
+            if isinstance(value, (int, long, float))))
 
-    filename = task_name + '.p'
-    with open(filename, 'wb') as handle:
-        data = {'instance': instance, 'result': result}
-        pickle.dump(data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        filename = task_name + '.p'
+        with open(filename, 'wb') as handle:
+            data = {'instance': instance, 'result': result}
+            pickle.dump(data, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-    shelf = shelve.open(task_name + '.s')
-    shelf.update(extra)
-    shelf.close()
+        shelf = shelve.open(task_name + '.s')
+        shelf.update(extra)
+        shelf.close()
 
-    return result['path_cost'] < float('inf')
+        return success
+    except MemoryError:
+        log.exception("Search failed: out of memory")
+        return False
